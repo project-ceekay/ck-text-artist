@@ -22,7 +22,10 @@
   <a href="https://cksoftware.netlify.app/">More CK Software</a>
 </p>
 
-![CK Text Artist](docs/screenshot.png)
+<p align="center">
+  <img src="docs/screenshot.png" alt="CK Text Artist in Light Mode" width="49%">
+  <img src="docs/screenshot-dark.png" alt="CK Text Artist in Dark Mode" width="49%">
+</p>
 
 Part of the **CK Suite**, a set of small, free Windows tools by [CK Software](https://cksoftware.netlify.app/).
 
@@ -46,6 +49,8 @@ Part of the **CK Suite**, a set of small, free Windows tools by [CK Software](ht
 - **Undo and redo** for every change
 
 ### Comfortable to use
+- **Top Menu Bar & Toolbar:** Classic menus (`File`, `Edit`, `View`, `Style`, `Presets`, `Help`) with 2×-supersampled procedural icons, hover tooltips, and active font name in the title bar
+- **Light & Dark Mode:** Native theme toggle from the toolbar or **View → Dark Mode**, with dark title bar styling (persisted across launches)
 - **Live preview** on a light, dark or checkerboard background
 - **Smooth window resizing:** the window keeps up with the mouse while you drag its edge and lays
   itself out once when you let go

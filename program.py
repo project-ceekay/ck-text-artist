@@ -36,737 +36,43 @@ try:  # drag-out support; the app works without it
 except ImportError:
     TkinterDnD = None
 
-APP_NAME = "CK Text Artist"
-VERSION = "1.0.0"
-REPO = "project-ceekay/ck-text-artist"
-SETTINGS_NAME = "Text Artist"  # %APPDATA%\CK Suite\<this>
-DEFAULT_TEXT = "Insert text here..."
-HEX_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
-FONT_EXTS = (".ttf", ".otf", ".ttc", ".otc")
-IMAGE_TYPES = [("Images", "*.png *.jpg *.jpeg *.bmp *.gif *.webp *.tif *.tiff"), ("All files", "*.*")]
-PREVIEW_BGS = {"Light": "#f0f0f0", "Dark": "#2b2b2b", "Checker": "#e6e6e6"}
-PAINT_MODES = ["Color", "Gradient", "Texture"]
-FIT_MODES = ["Tile", "Cover", "Stretch"]
-_R = getattr(Image, "Resampling", Image)
-RESAMPLE, BICUBIC = _R.LANCZOS, _R.BICUBIC
-MAX_TEXTURE = 2048  # textures are downsized to this on load to keep filters fast
-QUALITIES = ["1x", "2x", "3x", "4x"]  # output multiplier for exports and drag and drop
-DEFAULT_QUALITY = "4x"
-MAX_OUTPUT = 8000  # quality is reduced so the longest side stays under this
-PRESET_THUMB = (300, 50)  # max thumbnail size in the Presets tab
-
-PAINT_DEFAULTS = {
-    "mode": "Color", "color": "#000000", "color2": "#ffffff", "angle": 0,
-    "texture": "", "fit": "Tile", "scale": 100, "rotation": 0,
-    "brightness": 100, "contrast": 100, "saturation": 100, "hue": 0, "blur": 0,
-    "invert": False, "opacity": 100,
-}
-FILTER_KEYS = ("brightness", "contrast", "saturation", "hue", "blur", "invert")
-
-
-# ---------------------------------------------------------------- settings & updates
-# Each program defines APP_NAME, VERSION, REPO ("owner/name") and SETTINGS_NAME before this block.
-import re as _re
-import tempfile as _tempfile
-import urllib.error as _urlerror
-import urllib.request as _urlrequest
-import webbrowser as _webbrowser
-
-
-def settings_file(old_paths=(), name="config.json"):
-    """data_dir()/name; the first existing old location is copied over once."""
-    path = os.path.join(data_dir(), name)
-    if not os.path.exists(path):
-        for old in old_paths:
-            if old and os.path.isfile(old):
-                try:
-                    shutil.copy2(old, path)
-                except OSError:
-                    pass
-                break
-    return path
-
-
-def version_tuple(text):
-    return tuple(int(x) for x in _re.findall(r"\d+", text)[:3]) or (0,)
-
-
-def latest_release():
-    """{'version', 'notes', 'url', 'page'} of the newest GitHub release; {} if none yet."""
-    req = _urlrequest.Request(f"https://api.github.com/repos/{REPO}/releases/latest",
-                              headers={"User-Agent": "CK-Suite-Updater", "Accept": "application/vnd.github+json"})
-    try:
-        with _urlrequest.urlopen(req, timeout=10) as r:
-            data = json.load(r)
-    except _urlerror.HTTPError as e:
-        if e.code == 404:
-            return {}
-        raise
-    asset = next((a for a in data.get("assets", []) if a["name"].lower().endswith("setup.exe")), None)
-    return {"version": data.get("tag_name", "").lstrip("v"), "notes": data.get("body") or "",
-            "url": asset["browser_download_url"] if asset else None, "page": data.get("html_url")}
-
-
-class Updater:
-    """About box + daily update check + one-click install, living in the footer `bar`.
-    status(text, kind) / progress(0..100 or None) report to the window; quit() saves and closes it."""
-
-    def __init__(self, root, bar, cfg, make_icon, status, progress, quit):
-        self.root, self.cfg, self.make_icon = root, cfg, make_icon
-        self.status, self.progress, self.quit = status, progress, quit
-        self.auto = tk.BooleanVar(value=cfg.get("auto_update", True))
-        self.release = None
-        self.about_lbl = None
-        ttk.Style(root).configure("Link.TLabel", foreground="#0067c0")
-        about = ttk.Label(bar, text=f"About · v{VERSION}", style="Link.TLabel", cursor="hand2")
-        about.pack(side="right", padx=(0, self._px(16)))
-        about.bind("<Button-1>", lambda e: self.show_about())
-        self.link = ttk.Label(bar, text="", style="Link.TLabel", cursor="hand2", font=("Segoe UI Semibold", 10))
-        self.link.bind("<Button-1>", lambda e: self.offer())
-        if self.auto.get() and time.time() - cfg.get("last_update_check", 0) > 20 * 3600:
-            root.after(2500, lambda: self.check(quiet=True))
-
-    def state(self):
-        return {"auto_update": self.auto.get(), "last_update_check": self.cfg.get("last_update_check", 0)}
-
-    def _px(self, n):
-        return round(n * self.root.winfo_fpixels("1i") / 96)
-
-    def _dialog(self, title):
-        win = tk.Toplevel(self.root)
-        win.withdraw()
-        win.title(title)
-        win.transient(self.root)
-        win.resizable(False, False)
-        body = ttk.Frame(win, padding=self._px(18))
-        body.pack(fill="both", expand=True)
-        return win, body
-
-    def _show(self, win):
-        win.bind("<Escape>", lambda e: win.destroy())
-        win.update_idletasks()
-        win.geometry(f"+{self.root.winfo_rootx() + self._px(110)}+{self.root.winfo_rooty() + self._px(110)}")
-        win.deiconify()
-        win.grab_set()
-
-    def show_about(self):
-        win, body = self._dialog(f"About {APP_NAME}")
-        P = self._px
-        self._icon = ImageTk.PhotoImage(self.make_icon(P(56)))
-        ttk.Label(body, image=self._icon).grid(row=0, column=0, rowspan=3, sticky="n", padx=(0, P(14)))
-        ttk.Label(body, text=APP_NAME, font=("Segoe UI Semibold", 13)).grid(row=0, column=1, sticky="w")
-        ttk.Label(body, text=f"Version {VERSION}  ·  CK Suite  ·  © CK Software  ·  MIT License",
-                  foreground="#5f6368").grid(row=1, column=1, sticky="w")
-        link = ttk.Label(body, text=f"github.com/{REPO}", style="Link.TLabel", cursor="hand2")
-        link.grid(row=2, column=1, sticky="w", pady=(P(4), 0))
-        link.bind("<Button-1>", lambda e: _webbrowser.open(f"https://github.com/{REPO}"))
-        ttk.Separator(body).grid(row=3, column=0, columnspan=2, sticky="ew", pady=P(14))
-        ttk.Checkbutton(body, text="Check for updates automatically (once a day)", variable=self.auto).grid(
-            row=4, column=0, columnspan=2, sticky="w")
-        self.about_lbl = ttk.Label(body, text="", foreground="#5f6368")
-        self.about_lbl.grid(row=5, column=0, columnspan=2, sticky="w", pady=(P(8), 0))
-        bar = ttk.Frame(body)
-        bar.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(P(14), 0))
-        ttk.Button(bar, text="Close", command=win.destroy).pack(side="right")
-        ttk.Button(bar, text="Check for Updates Now",
-                   command=lambda: self.check(quiet=False)).pack(side="right", padx=(0, P(8)))
-        self._show(win)
-
-    def _about(self, text):
-        if self.about_lbl is not None and self.about_lbl.winfo_exists():
-            self.about_lbl.configure(text=text)
-
-    def check(self, quiet):
-        self._about("Checking…")
-        result = {}
-
-        def work():
-            try:
-                result["rel"] = latest_release()
-            except Exception:
-                result["rel"] = None
-
-        t = threading.Thread(target=work, daemon=True)
-        t.start()
-
-        def done():
-            if t.is_alive():
-                self.root.after(200, done)
-                return
-            self.cfg["last_update_check"] = time.time()
-            rel = result.get("rel")
-            if rel is None:
-                self._about("Couldn't reach GitHub. Check your internet connection.")
-            elif not rel:
-                self._about(f"No releases published yet. You have version {VERSION}.")
-            elif version_tuple(rel["version"]) > version_tuple(VERSION):
-                self.release = rel
-                self.link.configure(text=f"⬆ Version {rel['version']} is available")
-                self.link.pack(side="right", padx=(0, self._px(16)))
-                self._about(f"Version {rel['version']} is available (you have {VERSION}).")
-                if not quiet:
-                    self.offer()
-            else:
-                self._about(f"You have the latest version ({VERSION}).")
-
-        done()
-
-    def offer(self):
-        rel = self.release
-        if not rel:
-            return
-        win, body = self._dialog("Update available")
-        P = self._px
-        ttk.Label(body, text=f"{APP_NAME} {rel['version']} is available", font=("Segoe UI Semibold", 12)).pack(anchor="w")
-        ttk.Label(body, text=f"You have version {VERSION}. What's new:",
-                  foreground="#5f6368").pack(anchor="w", pady=(P(2), P(8)))
-        notes = tk.Text(body, height=10, width=64, wrap="word", font=("Segoe UI", 10), relief="flat",
-                        highlightthickness=1, highlightbackground="#d9d9d9", padx=P(8), pady=P(6))
-        notes.insert("1.0", rel["notes"].strip() or "(no release notes)")
-        notes.configure(state="disabled")
-        notes.pack(fill="both", expand=True)
-        bar = ttk.Frame(body)
-        bar.pack(fill="x", pady=(P(12), 0))
-        if getattr(sys, "frozen", False) and rel["url"]:
-            ttk.Button(bar, text="Update Now", default="active",
-                       command=lambda: (win.destroy(), self.install(rel))).pack(side="right")
-        else:  # running from source: send them to the release page
-            ttk.Button(bar, text="Open Download Page", default="active",
-                       command=lambda: (win.destroy(), _webbrowser.open(rel["page"]))).pack(side="right")
-        ttk.Button(bar, text="Later", command=win.destroy).pack(side="right", padx=(0, P(8)))
-        self._show(win)
-
-    def install(self, rel):
-        """Download the installer, run it quietly and close; the installer reopens the program."""
-        if getattr(self.root, "busy", False):
-            messagebox.showinfo(APP_NAME, "Wait for the current job to finish, then update.")
-            return
-        self.status(f"Downloading version {rel['version']}…", "muted")
-        self.progress(0)
-        dest = os.path.join(_tempfile.gettempdir(), "CK Suite updates", os.path.basename(rel["url"]))
-        st = {"frac": 0.0}
-
-        def work():
-            try:
-                os.makedirs(os.path.dirname(dest), exist_ok=True)
-                req = _urlrequest.Request(rel["url"], headers={"User-Agent": "CK-Suite-Updater"})
-                with _urlrequest.urlopen(req, timeout=30) as r, open(dest, "wb") as f:
-                    total, got = int(r.headers.get("Content-Length") or 0), 0
-                    while chunk := r.read(256 * 1024):
-                        f.write(chunk)
-                        got += len(chunk)
-                        st["frac"] = got / total if total else 0
-                st["ok"] = True
-            except Exception as e:
-                st["err"] = e
-
-        t = threading.Thread(target=work, daemon=True)
-        t.start()
-
-        def watch():
-            self.progress(st["frac"] * 100)
-            if t.is_alive():
-                self.root.after(150, watch)
-                return
-            self.progress(None)
-            if not st.get("ok"):
-                self.status(f"Download failed: {st.get('err')}", "error")
-                return
-            try:
-                subprocess.Popen([dest, "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS"])
-            except OSError as e:
-                self.status(f"Couldn't start the installer: {e}", "error")
-                return
-            self.quit()
-
-        watch()
-
-
-# ---------------------------------------------------------------- helpers
-def app_path():
-    if getattr(sys, "frozen", False):
-        return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
-
-
-def data_dir():
-    """Per-user settings folder: %APPDATA%\\CK Suite\\<SETTINGS_NAME>. The first time, settings,
-    presets and the font cache are copied over from the earlier Text Editor folders."""
-    if sys.platform.startswith("win"):
-        base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    elif sys.platform == "darwin":
-        base = os.path.expanduser("~/Library/Application Support")
-    else:
-        base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
-    path = os.path.join(base, "CK Suite", SETTINGS_NAME)
-    try:
-        if not os.path.exists(path):
-            for old in (os.path.join("CK Suite", "Text Editor"), "CKTextEditor"):  # earlier names
-                if os.path.isdir(os.path.join(base, old)):
-                    shutil.copytree(os.path.join(base, old), path)  # presets, settings, font cache
-                    break
-        os.makedirs(path, exist_ok=True)
-        return path
-    except OSError:
-        return app_path()
-
-
-def drag_dir():
-    """Temp folder for files handed out by drag and drop."""
-    return os.path.join(tempfile.gettempdir(), "CKTextEditor drag")
-
-
-def safe_filename(text, fallback="text"):
-    name = re.sub(r"[^\w\- ]+", "", text.split("\n")[0]).strip(" .")[:40] or fallback
-    if re.fullmatch(r"(?i)con|prn|aux|nul|com\d|lpt\d", name):  # reserved on Windows
-        name += "_"
-    return name
-
-
-def normalize_hex(value):
-    v = value.strip()
-    if v and not v.startswith("#"):
-        v = "#" + v
-    if not HEX_RE.match(v):
-        return None
-    if len(v) == 4:
-        v = "#" + "".join(c * 2 for c in v[1:])
-    return v.lower()
-
-
-def open_folder(folder):
-    try:
-        if sys.platform.startswith("win"):
-            os.startfile(folder)
-        elif sys.platform == "darwin":
-            subprocess.call(["open", folder])
-        else:
-            subprocess.call(["xdg-open", folder])
-    except Exception:
-        pass
-
-
-def rot_size(w, h, angle):
-    r = math.radians(angle)
-    c, s = abs(math.cos(r)), abs(math.sin(r))
-    return w * c + h * s, w * s + h * c
-
-
-def checker(size, cell=10):
-    w, h = size
-    tile = Image.new("RGBA", (cell * 2, cell * 2), "#ffffff")
-    d = ImageDraw.Draw(tile)
-    d.rectangle((0, 0, cell - 1, cell - 1), fill="#cfcfcf")
-    d.rectangle((cell, cell, 2 * cell - 1, 2 * cell - 1), fill="#cfcfcf")
-    out = Image.new("RGBA", (w, h))
-    for y in range(0, h, cell * 2):
-        for x in range(0, w, cell * 2):
-            out.paste(tile, (x, y))
-    return out
-
-
-# ------------------------------------------------------------- masks
-def dilate(mask, r):
-    """Grow an alpha mask outward by r pixels with a near-round (octagon) shape,
-    keeping the soft anti-aliased edge. The mask needs at least r pixels of margin."""
-    for i in range(r):
-        if i % 2 == 0:
-            mask = mask.filter(ImageFilter.MaxFilter(3))
-        else:
-            base = mask
-            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                mask = ImageChops.lighter(mask, ImageChops.offset(base, dx, dy))
-    return mask
-
-
-def outline_mask(alpha, r):
-    """Outline that stays solid around very thin (sub-pixel) parts of the letters:
-    the inner part grows from a boosted mask, only the outermost pixel stays soft."""
-    soft = dilate(alpha, r)
-    solid = dilate(alpha.point(lambda v: min(255, v * 4)), r - 1)
-    return ImageChops.lighter(soft, solid)
-
-
-# ------------------------------------------------------------- paints
-_RAW_TEX, _FILTERED_TEX = {}, {}
-
-
-def filtered_texture(cfg):
-    """The texture with its filters applied (cached). Returns None if there is none."""
-    path = cfg.get("texture")
-    if not path:
-        return None
-    key = (path,) + tuple(cfg[k] for k in FILTER_KEYS)
-    if key in _FILTERED_TEX:
-        return _FILTERED_TEX[key]
-    src = _RAW_TEX.get(path)
-    if src is None:
-        with Image.open(path) as im:
-            src = im.convert("RGBA")
-        src.thumbnail((MAX_TEXTURE, MAX_TEXTURE), RESAMPLE)
-        _RAW_TEX[path] = src
-    rgb, alpha = src.convert("RGB"), src.getchannel("A")
-    if cfg["brightness"] != 100:
-        rgb = ImageEnhance.Brightness(rgb).enhance(cfg["brightness"] / 100)
-    if cfg["contrast"] != 100:
-        rgb = ImageEnhance.Contrast(rgb).enhance(cfg["contrast"] / 100)
-    if cfg["saturation"] != 100:
-        rgb = ImageEnhance.Color(rgb).enhance(cfg["saturation"] / 100)
-    if cfg["hue"]:
-        shift = round(cfg["hue"] / 360 * 256)
-        h, s, v = rgb.convert("HSV").split()
-        rgb = Image.merge("HSV", (h.point(lambda x: (x + shift) % 256), s, v)).convert("RGB")
-    if cfg["invert"]:
-        rgb = ImageOps.invert(rgb)
-    out = rgb.convert("RGBA")
-    out.putalpha(alpha)
-    if cfg["blur"]:
-        out = out.filter(ImageFilter.GaussianBlur(cfg["blur"]))
-    if len(_FILTERED_TEX) > 8:
-        _FILTERED_TEX.pop(next(iter(_FILTERED_TEX)))
-    _FILTERED_TEX[key] = out
-    return out
-
-
-def gradient_fill(c1, c2, angle, w, h):
-    d = max(1, int(math.ceil(math.hypot(w, h))))
-    ramp = Image.linear_gradient("L").resize((d, d), BICUBIC).rotate(angle, BICUBIC)
-    left, top = (d - w) // 2, (d - h) // 2
-    mask = ramp.crop((left, top, left + w, top + h))
-    return Image.composite(Image.new("RGBA", (w, h), c2), Image.new("RGBA", (w, h), c1), mask)
-
-
-def texture_fill(tex, cfg, w, h, scale):
-    if cfg["fit"] == "Stretch":
-        return tex.resize((w, h), RESAMPLE)
-    f = cfg["scale"] / 100
-    f *= max(w / tex.width, h / tex.height) if cfg["fit"] == "Cover" else scale
-    tw, th = max(2, round(tex.width * f)), max(2, round(tex.height * f))
-    t = tex.resize((tw, th), RESAMPLE)
-    ang = cfg["rotation"] % 360
-    if ang:
-        cw = ch = int(math.ceil(math.hypot(w, h))) + 2
-    else:
-        cw, ch = w, h
-    # tiles are centred on the text box; build one row, then stack rows (fast)
-    strip = Image.new("RGBA", (cw, th))
-    x = int(round((cw / 2 - tw / 2) % tw - tw))
-    while x < cw:
-        strip.paste(t, (x, 0))
-        x += tw
-    canvas = Image.new("RGBA", (cw, ch))
-    y = int(round((ch / 2 - th / 2) % th - th))
-    while y < ch:
-        canvas.paste(strip, (0, y))
-        y += th
-    if ang:
-        canvas = canvas.rotate(ang, BICUBIC)
-        left, top = (cw - w) // 2, (ch - h) // 2
-        canvas = canvas.crop((left, top, left + w, top + h))
-    return canvas
-
-
-def make_paint(cfg, size, scale=1.0):
-    """A full-size RGBA image of the paint (colour, gradient or texture)."""
-    w, h = max(1, size[0]), max(1, size[1])
-    if cfg["mode"] == "Gradient":
-        return gradient_fill(cfg["color"], cfg["color2"], cfg["angle"], w, h)
-    if cfg["mode"] == "Texture":
-        tex = filtered_texture(cfg)  # may raise if the file is missing
-        if tex is not None:
-            return texture_fill(tex, cfg, w, h, scale)
-    return Image.new("RGBA", (w, h), cfg["color"])
-
-
-def svg_pen(glyphs):
-    try:
-        return SVGPathPen(glyphs, ntos=lambda v: ("%.2f" % v).rstrip("0").rstrip("."))
-    except TypeError:  # older fontTools without ntos
-        return SVGPathPen(glyphs)
-
-
-# ---------------------------------------------------------- font scanning
-def font_dirs():
-    home = os.path.expanduser("~")
-    if sys.platform.startswith("win"):
-        return [os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts"),
-                os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Windows", "Fonts")]
-    if sys.platform == "darwin":
-        return ["/System/Library/Fonts", "/Library/Fonts", os.path.join(home, "Library/Fonts")]
-    return ["/usr/share/fonts", "/usr/local/share/fonts",
-            os.path.join(home, ".fonts"), os.path.join(home, ".local/share/fonts")]
-
-
-def describe_font(font):
-    name = font["name"]
-    family = name.getDebugName(16) or name.getDebugName(1)
-    sub = (name.getDebugName(17) or name.getDebugName(2) or "").lower()
-    mac = font["head"].macStyle if "head" in font else 0
-    sel = font["OS/2"].fsSelection if "OS/2" in font else 0
-    bold = bool(mac & 1 or sel & 32)
-    italic = bool(mac & 2 or sel & 1)
-    key = ("bold" if bold else "") + ("italic" if italic else "") or "regular"
-    plain = sub in ("regular", "normal", "book", "roman", "bold", "italic",
-                    "bold italic", "oblique", "bold oblique")
-    return family, key, plain
-
-
-def scan_fonts():
-    """Returns {family: {style_key: [path, index, is_plain]}}"""
-    fams = {}
-
-    def add(font, path, idx):
-        if "name" not in font:
-            return
-        family, key, plain = describe_font(font)
-        if not family:
-            return
-        slot = fams.setdefault(family, {})
-        if key not in slot or (plain and not slot[key][2]):
-            slot[key] = [path, idx, plain]
-
-    for d in font_dirs():
-        for root, _, files in os.walk(d):
-            for fn in files:
-                if not fn.lower().endswith(FONT_EXTS):
-                    continue
-                path = os.path.join(root, fn)
-                try:
-                    if fn.lower().endswith((".ttc", ".otc")):
-                        for i, f in enumerate(TTCollection(path, lazy=True).fonts):
-                            add(f, path, i)
-                    else:
-                        f = TTFont(path, lazy=True, fontNumber=0)
-                        add(f, path, 0)
-                        f.close()
-                except Exception:
-                    continue
-    return fams
-
-
-# ------------------------------------------------------------- look & feel
-ACCENT = "#0067c0"      # Windows 11 accent blue
-ERROR = "#c42b1c"
-SUCCESS = "#0f7b0f"
-WARN = "#9d5d00"
-MUTED = "#5f6368"
-HEADER_BG = "#ffffff"
-BORDER = "#d9d9d9"
-HOVER = "#e5f1fb"
-# set_status() callers use these names/colours; map them onto the palette
-STATUS_COLORS = {"gray": MUTED, "#2ecc71": SUCCESS, "#e74c3c": ERROR, "#f39c12": WARN}
-SCALE = 1.0  # screen scaling (1.0 at 100%); set when the window is created
-
-
-def px(n):
-    """n pixels at 100% scaling, converted to this screen's scaling."""
-    return round(n * SCALE)
-
-
-def enable_dpi_awareness():
-    """Tell Windows we draw at real resolution, so text is sharp instead of stretched."""
-    if sys.platform.startswith("win"):
-        try:
-            import ctypes
-            ctypes.windll.shcore.SetProcessDpiAwareness(1)
-        except Exception:
-            pass
-
-
-def make_icon(size=64):
-    """A styled "T" on blue, drawn so the program needs no .ico file."""
-    s = size / 64
-    im = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    d = ImageDraw.Draw(im)
-    d.rounded_rectangle([4 * s, 4 * s, 60 * s, 60 * s], radius=12 * s, fill=ACCENT)
-    for (ox, oy), col in (((3, 3), "#003e74"), ((0, 0), "white")):  # shadow, then letter
-        d.rectangle([(15 + ox) * s, (14 + oy) * s, (47 + ox) * s, (22 + oy) * s], fill=col)
-        d.rectangle([(27 + ox) * s, (14 + oy) * s, (35 + ox) * s, (49 + oy) * s], fill=col)
-    return im
-
-
-def section(parent, text):
-    """A titled group box, stacked down the tab."""
-    box = ttk.Labelframe(parent, text=text, style="Section.TLabelframe", padding=px(10))
-    box.pack(fill="x", pady=(0, px(10)))
-    return box
-
-
-def hint(parent, text, **pack):
-    lbl = ttk.Label(parent, text=text, style="Muted.TLabel", wraplength=px(350), justify="left")
-    lbl.pack(anchor="w", **(pack or {"pady": (px(2), 0)}))
-    return lbl
-
-
-def segmented(parent, values, var, command=None):
-    """A row of toggle buttons that work like radio buttons."""
-    row = ttk.Frame(parent)
-    for v in values:
-        ttk.Radiobutton(row, text=v, value=v, variable=var, style="Toolbutton",
-                        command=command).pack(side="left", padx=(0, px(2)))
-    return row
-
-
-def styled_listbox(parent, height):
-    return tk.Listbox(parent, height=height, exportselection=False, activestyle="none", relief="flat",
-                      borderwidth=0, highlightthickness=1, highlightbackground=BORDER,
-                      highlightcolor=BORDER, font=("Segoe UI", 10), bg="white", fg="#1a1a1a",
-                      selectbackground=ACCENT, selectforeground="white")
-
-
-class ScrollFrame(ttk.Frame):
-    """A frame whose contents scroll vertically. Put widgets in .body."""
-
-    def __init__(self, master, padding=0):
-        super().__init__(master)
-        bg = ttk.Style().lookup("TFrame", "background") or "#f0f0f0"
-        self.canvas = tk.Canvas(self, highlightthickness=0, borderwidth=0, bg=bg,
-                                yscrollincrement=px(20))
-        bar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
-
-        def set_bar(lo, hi):  # the scrollbar only shows when the contents don't fit
-            if float(lo) <= 0 and float(hi) >= 1:
-                bar.pack_forget()
-            elif not bar.winfo_ismapped():
-                bar.pack(side="right", fill="y", before=self.canvas)
-            bar.set(lo, hi)
-
-        self.canvas.configure(yscrollcommand=set_bar)
-        self.body = ttk.Frame(self.canvas, padding=padding)
-        win = self.canvas.create_window(0, 0, window=self.body, anchor="nw")
-        self.canvas.pack(side="left", fill="both", expand=True)
-        self.body.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
-        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(win, width=e.width))
-
-    def scroll(self, delta):
-        if self.canvas.yview() != (0.0, 1.0):  # only when the contents don't fit
-            steps = -delta / 120 * 3
-            self.canvas.yview_scroll(int(steps) or (1 if steps > 0 else -1), "units")
-
-
-class SliderRow(ttk.Frame):
-    """Label, slider and a number box you can type into. Double-click the slider to reset."""
-
-    def __init__(self, master, text, lo, hi, value, on_change):
-        super().__init__(master)
-        self.on_change = on_change
-        self.lo, self.hi, self.default, self.value = lo, hi, value, value
-        self._setting = False
-        ttk.Label(self, text=text, width=17).grid(row=0, column=0, sticky="w")
-        self.scale = ttk.Scale(self, from_=lo, to=hi, command=self._moved)
-        self.scale.grid(row=0, column=1, sticky="ew", padx=(px(4), px(8)))
-        self.spin_var = tk.StringVar(value=str(value))
-        spin = ttk.Spinbox(self, from_=lo, to=hi, textvariable=self.spin_var, width=5, command=self._typed)
-        spin.grid(row=0, column=2)
-        spin.bind("<Return>", self._typed)
-        spin.bind("<FocusOut>", self._typed)
-        self.scale.bind("<Double-Button-1>", lambda e: self.after_idle(self.reset))
-        self.columnconfigure(1, weight=1)
-        self.set(value)
-
-    def _moved(self, v):
-        if self._setting:
-            return
-        n = int(round(float(v)))
-        if abs(float(v) - n) > 1e-9:
-            self._set_scale(n)  # snap to whole numbers
-        if n != self.value:
-            self.value = n
-            self.spin_var.set(str(n))
-            self.on_change()
-
-    def _typed(self, *_):
-        try:
-            n = max(self.lo, min(self.hi, int(round(float(self.spin_var.get())))))
-        except ValueError:
-            self.spin_var.set(str(self.value))
-            return
-        if n != self.value:
-            self.set(n)
-            self.on_change()
-        else:
-            self.spin_var.set(str(n))
-
-    def _set_scale(self, v):
-        self._setting = True
-        try:
-            self.scale.set(v)
-        finally:
-            self._setting = False
-
-    def reset(self):
-        if self.value != self.default:
-            self.set(self.default)
-            self.on_change()
-
-    def get(self):
-        return self.value
-
-    def set(self, v):
-        self.value = int(round(v))
-        self._set_scale(self.value)
-        self.spin_var.set(str(self.value))
-
-
-class ColorField(ttk.Frame):
-    """Colour square (click to pick), hex entry with validation, and optional save button."""
-
-    def __init__(self, master, initial, on_change, on_star=None):
-        super().__init__(master)
-        self.on_change = on_change
-        self.value = normalize_hex(initial) or "#000000"
-        self.swatch = tk.Label(self, bg=self.value, width=3, cursor="hand2",
-                               highlightthickness=1, highlightbackground="#8a8a8a")
-        self.swatch.pack(side="left", ipady=px(1))
-        self.swatch.bind("<Button-1>", lambda e: self.pick())
-        self.var = tk.StringVar(value=self.value)
-        self.entry = ttk.Entry(self, textvariable=self.var, width=10)
-        self.entry.pack(side="left", padx=(px(6), 0))
-        ttk.Button(self, text="Pick…", width=6, command=self.pick).pack(side="left", padx=(px(6), 0))
-        if on_star:
-            ttk.Button(self, text="★ Save", width=7, command=on_star).pack(side="left", padx=(px(4), 0))
-        self.var.trace_add("write", self._changed)
-
-    def _changed(self, *_):
-        v = normalize_hex(self.var.get())
-        if v:
-            self.value = v
-            self.swatch.configure(bg=v)
-            self.entry.configure(style="TEntry")
-            self.on_change()
-        else:
-            self.entry.configure(style="Invalid.TEntry")
-
-    def pick(self):
-        c = colorchooser.askcolor(initialcolor=self.value, parent=self)[1]
-        if c:
-            self.set(c)
-
-    def set(self, v):
-        self.var.set(v)
-
+import ui_kit
+from ui_kit import *
+import rendering
+from rendering import *
 
 class PresetCard(tk.Frame):
     """A saved preset: name and thumbnail (click to load) plus a delete button."""
 
     def __init__(self, master, name, thumb, on_pick, on_delete):
-        super().__init__(master, bg="white", highlightthickness=1, highlightbackground=BORDER, cursor="hand2")
-        body = tk.Frame(self, bg="white")
-        body.pack(side="left", fill="x", expand=True, padx=px(10), pady=px(8))
+        bg = "#252526" if DARK_MODE else "white"
+        bd = "#3c4043" if DARK_MODE else BORDER
+        fg = "#e8eaed" if DARK_MODE else "#1a1a1a"
+        super().__init__(master, bg=bg, highlightthickness=1, highlightbackground=bd, cursor="hand2")
+        body = tk.Frame(self, bg=bg)
+        body.pack(side="left", fill="x", expand=True, padx=px(10), pady=px(6))
         self.parts = [self, body]
-        lbl = tk.Label(body, text=name, bg="white", fg="#1a1a1a", font=("Segoe UI Semibold", 10), anchor="w")
-        lbl.pack(anchor="w")
-        self.parts.append(lbl)
+        self.lbl = tk.Label(body, text=name, bg=bg, fg=fg, font=("Segoe UI Semibold", 10), anchor="w")
+        self.lbl.pack(anchor="w")
+        self.parts.append(self.lbl)
         if thumb is not None:
-            pic = tk.Label(body, image=thumb, bg="white")
+            pic = tk.Label(body, image=thumb, bg=bg)
             pic.image = thumb
             pic.pack(anchor="w", pady=(px(4), 0))
             self.parts.append(pic)
         ttk.Button(self, text="Delete", width=7, command=lambda: on_delete(name)).pack(side="right", padx=px(8))
         for w in self.parts:
             w.bind("<Button-1>", lambda e: on_pick(name))
-            w.bind("<Enter>", lambda e: self._paint(HOVER))
+            w.bind("<Enter>", lambda e: self._paint("#323236" if DARK_MODE else HOVER))
             w.bind("<Leave>", self._leave)
+
+    def retheme(self):
+        bg = "#252526" if DARK_MODE else "white"
+        bd = "#3c4043" if DARK_MODE else BORDER
+        fg = "#e8eaed" if DARK_MODE else "#1a1a1a"
+        self.configure(highlightbackground=bd)
+        self.lbl.configure(fg=fg)
+        self._paint(bg)
 
     def _paint(self, colour):
         for w in self.parts:
@@ -777,7 +83,7 @@ class PresetCard(tk.Frame):
         while w is not None and w is not self:
             w = w.master
         if w is None:
-            self._paint("white")
+            self._paint("#252526" if DARK_MODE else "white")
 
 
 class PaintPanel(ttk.Frame):
@@ -940,117 +246,6 @@ class PaintPanel(ttk.Frame):
 
 
 # ------------------------------------------------------------------ app
-def smooth_resize(root, settle_ms=120):
-    """Keep dragging the window edge smooth. On Windows every Tk widget is its own native window,
-    and all of them are moved and repainted on every resize step, so live resizing a full window
-    lags. While the size is changing, the window shows a still picture of itself instead (the
-    bottom-packed footer pinned to the bottom edge) and the real widgets are hidden; settle_ms
-    after the last change they come back, laid out once for the new size."""
-    if not sys.platform.startswith("win"):
-        return
-    import ctypes
-    from ctypes import wintypes
-    user32, gdi32 = ctypes.windll.user32, ctypes.windll.gdi32
-    H = ctypes.c_void_p
-    user32.GetDC.restype = H
-    user32.GetDC.argtypes = [wintypes.HWND]
-    user32.ReleaseDC.argtypes = [wintypes.HWND, H]
-    user32.PrintWindow.argtypes = [wintypes.HWND, H, wintypes.UINT]
-    gdi32.CreateCompatibleDC.restype = H
-    gdi32.CreateCompatibleDC.argtypes = [H]
-    gdi32.CreateCompatibleBitmap.restype = H
-    gdi32.CreateCompatibleBitmap.argtypes = [H, ctypes.c_int, ctypes.c_int]
-    gdi32.SelectObject.restype = H
-    gdi32.SelectObject.argtypes = [H, H]
-    gdi32.GetDIBits.argtypes = [H, H, wintypes.UINT, wintypes.UINT, ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT]
-    gdi32.DeleteObject.argtypes = [H]
-    gdi32.DeleteDC.argtypes = [H]
-
-    def capture(w, h):
-        """The window's client area as Windows composed it, even where other windows cover it."""
-        hwnd = int(root.wm_frame(), 16)
-        hdc = user32.GetDC(hwnd)
-        mem = gdi32.CreateCompatibleDC(hdc)
-        bmp = gdi32.CreateCompatibleBitmap(hdc, w, h)
-        old = gdi32.SelectObject(mem, bmp)
-        try:
-            if not user32.PrintWindow(hwnd, mem, 3):  # PW_CLIENTONLY | PW_RENDERFULLCONTENT
-                return None
-            header = (ctypes.c_uint32 * 10)(40, w, ctypes.c_uint32(-h).value, 1 | (32 << 16), 0, 0, 0, 0, 0, 0)
-            buf = ctypes.create_string_buffer(w * h * 4)  # 32-bit top-down BGRX rows
-            if not gdi32.GetDIBits(mem, bmp, 0, h, buf, header, 0):
-                return None
-            return Image.frombuffer("RGB", (w, h), buf.raw, "raw", "BGRX", 0, 1)
-        finally:
-            gdi32.SelectObject(mem, old)
-            gdi32.DeleteObject(bmp)
-            gdi32.DeleteDC(mem)
-            user32.ReleaseDC(hwnd, hdc)
-
-    bg = ttk.Style(root).lookup("TFrame", "background") or "#f0f0f0"
-    state = {"size": None, "frozen": None, "shots": [], "job": None, "zoomed": False}
-    big = round(200 * root.winfo_fpixels("1i") / 96)  # a jump this large (200 px at 100%) is no drag
-
-    def thaw():
-        state["job"] = None
-        frozen, state["frozen"] = state["frozen"], None
-        for w, info in frozen or ():
-            w.pack(**info)  # in the original order, so the layout is exactly as before
-        for shot in state["shots"]:
-            shot.destroy()
-        state["shots"] = []
-
-    def freeze(old_w, old_h):
-        slaves = [(w, w.pack_info()) for w in root.pack_slaves() if w.winfo_ismapped()]
-        if not slaves:
-            return
-        w, h = root.winfo_width(), root.winfo_height()
-        try:
-            shown = capture(w, h)
-        except (OSError, ValueError, tk.TclError):
-            shown = None
-        if shown is None:
-            return  # just resize normally
-        # the sections are still laid out for the old size; a strip lost to shrinking shows as background
-        image = Image.new("RGB", (old_w, old_h), tuple(c >> 8 for c in root.winfo_rgb(bg)))
-        image.paste(shown.crop((0, 0, min(w, old_w), min(h, old_h))))
-        # everything from the first bottom-packed section down stays pinned to the bottom edge
-        split = min([w.winfo_y() for w, info in slaves if info.get("side") == "bottom"] or [old_h])
-        for box, place in (((0, 0, old_w, split), dict(x=0, y=0, anchor="nw")),
-                           ((0, split, old_w, old_h), dict(x=0, rely=1, anchor="sw"))):
-            if box[3] > box[1]:
-                photo = ImageTk.PhotoImage(image.crop(box))
-                shot = tk.Label(root, image=photo, bd=0, highlightthickness=0, bg=bg)
-                shot.image = photo
-                shot.place(**place)
-                state["shots"].append(shot)
-        for w, info in slaves:
-            info.pop("in", None)
-            w.pack_forget()
-        state["frozen"] = slaves
-
-    def on_configure(e):
-        if e.widget is not root:
-            return
-        size = (e.width, e.height)
-        old = state["size"]
-        state["size"] = size
-        if old in (None, size):
-            return
-        zoomed, was_zoomed = root.state() == "zoomed", state["zoomed"]
-        state["zoomed"] = zoomed
-        if state["frozen"] is None:
-            # one-off jumps (maximize, restore, snapping) just lay out once, as normal
-            if zoomed or was_zoomed or abs(size[0] - old[0]) > big or abs(size[1] - old[1]) > big:
-                return
-            freeze(*old)  # the window still shows the layout for the previous size
-        if state["job"]:
-            root.after_cancel(state["job"])
-        state["job"] = root.after(settle_ms, thaw)
-
-    root.configure(bg=bg)  # what shows in newly uncovered space while frozen
-    root.bind("<Configure>", on_configure, add="+")
-
 
 class FontApp(tk.Tk):
     def __init__(self):
@@ -1068,10 +263,10 @@ class FontApp(tk.Tk):
         self.drag_key = None  # state of the last rendered drag file, to reuse it
         self.drag_path = ""
         self.drag_info = ""
-        self.title(APP_NAME)
-        h = min(px(860), self.winfo_screenheight() - px(80))
-        self.geometry(f"{px(1300)}x{h}")
-        self.minsize(px(1000), min(px(620), h))
+        self.title(f"{APP_NAME} v{VERSION}")
+        h = min(px(760), self.winfo_screenheight() - px(80))
+        self.geometry(f"{px(1180)}x{h}")
+        self.minsize(px(960), min(px(580), h))
         self.icon = ImageTk.PhotoImage(make_icon())
         self.iconphoto(True, self.icon)
         self.setup_style()
@@ -1079,6 +274,7 @@ class FontApp(tk.Tk):
         self.config_file = os.path.join(data_dir(), "config.json")
         self.cache_file = os.path.join(data_dir(), "font_cache.json")
         self.prefs = self.load_prefs()
+        self.dark_mode = tk.BooleanVar(value=bool(self.prefs.get("dark_mode", False)))
         self.presets_file = os.path.join(data_dir(), "presets.json")
         self.presets = self.load_presets()
 
@@ -1100,6 +296,8 @@ class FontApp(tk.Tk):
         self.snap_job = None
 
         self.build_ui()
+        self.apply_dark_mode()
+        self.update_title()
         smooth_resize(self)
         self.bind_shortcuts()
         self.load_fonts()
@@ -1116,9 +314,9 @@ class FontApp(tk.Tk):
                     tkfont.nametofont(name).configure(family="Segoe UI", size=10)
                 except tk.TclError:
                     pass
-        style.configure("Go.TButton", font=("Segoe UI Semibold", 10), padding=(px(20), px(6)))
-        style.configure("Footer.TButton", padding=(px(14), px(6)))
-        style.configure("Toolbutton", padding=(px(10), px(3)))
+        style.configure("Go.TButton", font=("Segoe UI Semibold", 10), padding=(px(18), px(5)))
+        style.configure("Footer.TButton", padding=(px(12), px(5)))
+        style.configure("Toolbutton", padding=(px(9), px(2)))
         style.configure("Section.TLabelframe.Label", font=("Segoe UI Semibold", 10), foreground=ACCENT)
         style.configure("Muted.TLabel", foreground=MUTED)
         style.configure("Invalid.TEntry", foreground=ERROR)
@@ -1127,26 +325,28 @@ class FontApp(tk.Tk):
     # ---------------------------------------------------------- UI
     def slider(self, parent, text, lo, hi, value):
         s = SliderRow(parent, text, lo, hi, value, self.schedule_preview)
-        s.pack(fill="x", pady=px(2))
+        s.pack(fill="x", pady=px(1))
         return s
 
-    def build_ui(self):
-        # header band
-        header = tk.Frame(self, bg=HEADER_BG)
-        header.pack(fill="x")
-        tk.Label(header, text="Text Artist", bg=HEADER_BG, fg="#1a1a1a",
-                 font=("Segoe UI Semibold", 16)).pack(anchor="w", padx=px(20), pady=(px(14), 0))
-        tk.Label(header, text="Style text with any installed font, fills, outlines and shadows, "
-                              "then export it as PNG, JPG or SVG.",
-                 bg=HEADER_BG, fg=MUTED, font=("Segoe UI", 10)).pack(anchor="w", padx=px(20), pady=(0, px(14)))
-        ttk.Separator(self).pack(fill="x")
+    def update_title(self):
+        font = self.selected_font or "Arial"
+        self.title(f"{APP_NAME} v{VERSION} - {font}")
 
+    def build_ui(self):
         self.build_footer()  # packed before the body so it always stays visible
         ttk.Separator(self).pack(side="bottom", fill="x")
 
-        body = ttk.Frame(self, padding=(px(16), px(12), px(16), px(12)))
+        self.bold_var = tk.BooleanVar(value=False)
+        self.italic_var = tk.BooleanVar(value=False)
+        self.align_var = tk.StringVar(value="Left")
+        self.bg_toggle = tk.StringVar(value="Dark")
+
+        self.build_menubar()
+        self.build_toolbar()
+
+        body = ttk.Frame(self, padding=(px(12), px(8), px(12), px(8)))
         body.pack(fill="both", expand=True)
-        left = ttk.Frame(body, width=px(450))
+        left = ttk.Frame(body, width=px(380))
         left.pack(side="left", fill="y")
         left.pack_propagate(False)
         self.tabs = ttk.Notebook(left)
@@ -1155,7 +355,7 @@ class FontApp(tk.Tk):
         for name, build in (("Text", self.build_text_tab), ("Layout", self.build_layout_tab),
                             ("Fill", self.build_fill_tab), ("Outline", self.build_outline_tab),
                             ("Effects", self.build_effects_tab), ("Presets", self.build_presets_tab)):
-            sf = ScrollFrame(self.tabs, padding=(px(10), px(10), px(6), px(4)))
+            sf = ScrollFrame(self.tabs, padding=(px(8), px(6), px(6), px(4)))
             self.tabs.add(sf, text=name)
             self.tab_frames[name] = sf
             build(sf.body)
@@ -1166,6 +366,262 @@ class FontApp(tk.Tk):
         self.bind_all("<MouseWheel>", self.on_wheel)
         for cls in ("TSpinbox", "TCombobox"):
             self.unbind_class(cls, "<MouseWheel>")
+
+    def build_menubar(self):
+        mb_bg = "#1e1e1e" if DARK_MODE else "#ffffff"
+        mb_fg = "#e8eaed" if DARK_MODE else "#1a1a1a"
+        bar = tk.Frame(self, bg=mb_bg, padx=px(4), pady=px(1))
+        bar.pack(fill="x")
+        self.menubar_frame = bar
+        self._menu_btns = []
+        self._menus = []
+
+        def add_menu(label, underline, items):
+            btn = tk.Label(bar, text=label, underline=underline, bg=mb_bg, fg=mb_fg,
+                           font=("Segoe UI", 9), padx=px(7), pady=px(2))
+            btn.pack(side="left")
+            m = tk.Menu(btn, tearoff=False, font=("Segoe UI", 9))
+            self._menus.append(m)
+            for item in items:
+                if item is None:
+                    m.add_separator()
+                elif item[0] == "__check__":
+                    m.add_checkbutton(label=item[1], variable=item[2], command=item[3],
+                                      accelerator=item[4] if len(item) > 4 else "")
+                else:
+                    m.add_command(label=item[0], command=item[1],
+                                  accelerator=item[2] if len(item) > 2 else "",
+                                  underline=item[3] if len(item) > 3 else -1)
+
+            def on_enter(e=None):
+                btn.configure(bg="#323236" if DARK_MODE else "#e5f1fb")
+
+            def on_leave(e=None):
+                btn.configure(bg="#1e1e1e" if DARK_MODE else "#ffffff")
+
+            def open_menu(e=None):
+                on_enter()
+                try:
+                    m.tk_popup(btn.winfo_rootx(), btn.winfo_rooty() + btn.winfo_height())
+                finally:
+                    m.grab_release()
+                    on_leave()
+                return "break"
+
+            btn.bind("<Enter>", on_enter)
+            btn.bind("<Leave>", on_leave)
+            btn.bind("<Button-1>", open_menu)
+            if 0 <= underline < len(label):
+                ch = label[underline].lower()
+                self.bind(f"<Alt-Key-{ch}>", open_menu)
+                self.bind(f"<Alt-Key-{ch.upper()}>", open_menu)
+            self._menu_btns.append(btn)
+            return m
+
+        add_menu("File", 0, [
+            ("New / Reset design", self.reset_design, "Ctrl+N", 0),
+            None,
+            ("Export image / SVG…", self.export, "Ctrl+E", 0),
+            None,
+            ("Import preset file…", self.import_preset_file, "", 0),
+            ("Export preset file…", self.export_preset_file, "", 1),
+            None,
+            ("Rescan system fonts", self.rescan, "F5", 0),
+            None,
+            ("Exit", self.on_close, "Alt+F4", 1),
+        ])
+        add_menu("Edit", 0, [
+            ("Undo", self.undo, "Ctrl+Z", 0),
+            ("Redo", self.redo, "Ctrl+Y", 0),
+            None,
+            ("Copy text", self.copy_text, "", 0),
+            ("Clear text", self.clear_text, "", 1),
+        ])
+        add_menu("View", 0, [
+            ("Text tab", lambda: self.select_tab("Text"), ""),
+            ("Layout tab", lambda: self.select_tab("Layout"), ""),
+            ("Fill tab", lambda: self.select_tab("Fill"), ""),
+            ("Outline tab", lambda: self.select_tab("Outline"), ""),
+            ("Effects tab", lambda: self.select_tab("Effects"), ""),
+            ("Presets tab", lambda: self.select_tab("Presets"), "Ctrl+O"),
+            None,
+            ("Preview: Light", lambda: (self.bg_toggle.set("Light"), self.set_preview_bg("Light")), ""),
+            ("Preview: Dark", lambda: (self.bg_toggle.set("Dark"), self.set_preview_bg("Dark")), ""),
+            ("Preview: Checker", lambda: (self.bg_toggle.set("Checker"), self.set_preview_bg("Checker")), ""),
+            None,
+            ("__check__", "Dark Mode", self.dark_mode, self.apply_dark_mode, ""),
+        ])
+        add_menu("Style", 0, [
+            ("__check__", "Bold", self.bold_var, self.schedule_preview, "Ctrl+B"),
+            ("__check__", "Italic", self.italic_var, self.schedule_preview, "Ctrl+I"),
+            None,
+            ("Align Left", lambda: (self.align_var.set("Left"), self.schedule_preview()), ""),
+            ("Align Center", lambda: (self.align_var.set("Center"), self.schedule_preview()), ""),
+            ("Align Right", lambda: (self.align_var.set("Right"), self.schedule_preview()), ""),
+            None,
+            ("★ Add current font to Favorites", lambda: self.add_font_fav(self.selected_font), ""),
+            ("★ Save current fill color", self.add_color_fav, ""),
+        ])
+        add_menu("Presets", 0, [
+            ("Save current as preset…", self.save_preset, "Ctrl+S", 0),
+            ("Open Presets tab", self.show_presets, "Ctrl+O", 0),
+            None,
+            ("Import preset file…", self.import_preset_file, "", 0),
+            ("Export preset file…", self.export_preset_file, "", 0),
+        ])
+        add_menu("Help", 0, [
+            ("Check for Updates…", lambda: self.updater.check(quiet=False), ""),
+            None,
+            (f"About {APP_NAME}", self.updater.show_about, ""),
+        ])
+        self.menubar_sep = tk.Frame(self, height=1, bg=BORDER)
+        self.menubar_sep.pack(fill="x")
+
+    def build_toolbar(self):
+        bg = ttk.Style(self).lookup("TFrame", "background") or "#f0f0f0"
+        bar = tk.Frame(self, bg=bg, padx=px(8), pady=px(3))
+        bar.pack(fill="x")
+        self.toolbar_bar = bar
+        self._tb_icons = {}
+        self._tb_btns = []
+        self._tb_seps = []
+        icon_px = px(18)
+        cell_px = px(24)
+        self.tb_hint = tk.Label(bar, text="", bg=bg, fg=MUTED, font=("Segoe UI", 9))
+        self.tb_hint.pack(side="right", padx=(0, px(6)))
+
+        def set_tb_hint(text):
+            self.tb_hint.configure(text=text)
+            self.set_status(text or "Ready")
+
+        def make_btn(kind, tip, cmd):
+            icon = make_toolbar_icon(kind, icon_px, dark=DARK_MODE)
+            self._tb_icons[kind] = icon
+            btn = tk.Label(bar, image=icon, width=cell_px, height=cell_px, bg=bg, bd=0,
+                           highlightthickness=1, highlightbackground=bg)
+            btn.pack(side="left", padx=px(1))
+            self._tb_btns.append((kind, btn))
+
+            def on_enter(e=None):
+                hov = "#323236" if DARK_MODE else HOVER
+                bd_hov = "#4cc2ff" if DARK_MODE else "#99d1ff"
+                btn.configure(bg=hov, highlightbackground=bd_hov)
+
+            def on_leave(e=None):
+                cur_bg = "#252526" if DARK_MODE else (ttk.Style(self).lookup("TFrame", "background") or "#f0f0f0")
+                btn.configure(bg=cur_bg, highlightbackground=cur_bg)
+
+            def on_press(e=None):
+                pr_bg = "#094771" if DARK_MODE else "#cce4f7"
+                btn.configure(bg=pr_bg, highlightbackground=ACCENT)
+
+            def on_release(e=None):
+                on_enter()
+                if cmd:
+                    cmd()
+
+            btn.bind("<Enter>", on_enter)
+            btn.bind("<Leave>", on_leave)
+            btn.bind("<ButtonPress-1>", on_press)
+            btn.bind("<ButtonRelease-1>", on_release)
+            attach_tooltip(btn, tip, status_fn=set_tb_hint)
+
+        def sep():
+            s = tk.Frame(bar, width=1, height=px(18), bg=BORDER)
+            s.pack(side="left", padx=px(5), pady=px(4))
+            self._tb_seps.append(s)
+
+        make_btn("new", "New / Reset design (Ctrl+N)", self.reset_design)
+        make_btn("presets", "Presets library (Ctrl+O)", self.show_presets)
+        make_btn("save_preset", "Save current as preset… (Ctrl+S)", self.save_preset)
+        make_btn("export", "Export PNG / JPG / SVG… (Ctrl+E)", self.export)
+        sep()
+        make_btn("undo", "Undo (Ctrl+Z)", self.undo)
+        make_btn("redo", "Redo (Ctrl+Y)", self.redo)
+        sep()
+        make_btn("bold", "Toggle Bold (Ctrl+B)", self.toggle_bold)
+        make_btn("italic", "Toggle Italic (Ctrl+I)", self.toggle_italic)
+        make_btn("align_left", "Align Left", lambda: (self.align_var.set("Left"), self.schedule_preview()))
+        make_btn("align_center", "Align Center", lambda: (self.align_var.set("Center"), self.schedule_preview()))
+        make_btn("align_right", "Align Right", lambda: (self.align_var.set("Right"), self.schedule_preview()))
+        sep()
+        make_btn("fav_font", "★ Add current font to Favorites", lambda: self.add_font_fav(self.selected_font))
+        make_btn("rescan", "Rescan system fonts (F5)", self.rescan)
+        sep()
+        make_btn("theme", "Toggle Dark Mode", self.toggle_dark_mode)
+        ttk.Separator(self).pack(fill="x")
+
+    def toggle_bold(self):
+        self.bold_var.set(not self.bold_var.get())
+        self.schedule_preview()
+
+    def toggle_italic(self):
+        self.italic_var.set(not self.italic_var.get())
+        self.schedule_preview()
+
+    def copy_text(self):
+        self.clipboard_clear()
+        self.clipboard_append(self.text_box.get("1.0", "end-1c"))
+        self.set_status("Copied text to clipboard")
+
+    def clear_text(self):
+        self.text_box.delete("1.0", "end")
+        self.schedule_preview()
+
+    def reset_design(self):
+        self.apply_state({
+            "text": DEFAULT_TEXT, "font": "Arial" if "Arial" in self.families else self.selected_font,
+            "bold": False, "italic": False, "align": "Left",
+            "size": 100, "char": 0, "line": 0, "pad": 0, "outline": 0,
+            "stretch_x": 100, "stretch_y": 100, "rotation": 0,
+            "fill": dict(PAINT_DEFAULTS), "stroke_paint": dict(PAINT_DEFAULTS, color="#ffffff"),
+            "shadow": {"on": False, "color": "#000000", "opacity": 60, "dx": 8, "dy": 8, "blur": 6},
+            "bg_mode": "Transparent", "bg_color": "#ffffff",
+        })
+        self.set_status("Reset to default design")
+
+    def toggle_dark_mode(self):
+        self.dark_mode.set(not self.dark_mode.get())
+        self.apply_dark_mode()
+
+    def apply_dark_mode(self):
+        dark = bool(self.dark_mode.get())
+        apply_theme(self, dark)
+        mb_bg = "#1e1e1e" if dark else "#ffffff"
+        mb_fg = "#e8eaed" if dark else "#1a1a1a"
+        tb_bg = "#252526" if dark else (ttk.Style(self).lookup("TFrame", "background") or "#f0f0f0")
+        sep_bg = "#3c4043" if dark else BORDER
+        if hasattr(self, "menubar_frame"):
+            self.menubar_frame.configure(bg=mb_bg)
+            self.menubar_sep.configure(bg="#2d2d30" if dark else "#e5e5e5")
+            for b in self._menu_btns:
+                b.configure(bg=mb_bg, fg=mb_fg)
+        for m in getattr(self, "_menus", ()):
+            m.configure(
+                bg="#252526" if dark else "#ffffff",
+                fg="#e8eaed" if dark else "#1a1a1a",
+                activebackground="#094771" if dark else ACCENT,
+                activeforeground="#ffffff",
+                selectcolor="#4cc2ff" if dark else "#1a1a1a",
+            )
+        self.toolbar_bar.configure(bg=tb_bg)
+        self.tb_hint.configure(bg=tb_bg, fg="#9aa0a6" if dark else MUTED)
+        icon_px = px(18)
+        for kind, btn in self._tb_btns:
+            icon = make_toolbar_icon(kind, icon_px, dark=dark)
+            self._tb_icons[kind] = icon
+            btn.configure(image=icon, bg=tb_bg, highlightbackground=tb_bg)
+        for s in self._tb_seps:
+            s.configure(bg=sep_bg)
+        if hasattr(self, "text_box"):
+            self.text_box.configure(
+                bg="#141414" if dark else "white",
+                fg="#e8eaed" if dark else "#1a1a1a",
+                insertbackground="#e8eaed" if dark else "#1a1a1a",
+                highlightbackground=sep_bg,
+            )
+        if hasattr(self, "preview_holder"):
+            self.preview_holder.configure(highlightbackground=sep_bg)
 
     def on_wheel(self, e):
         w = self.winfo_containing(e.x_root, e.y_root)
@@ -1182,16 +638,15 @@ class FontApp(tk.Tk):
 
     def build_text_tab(self, t):
         s = section(t, "Text")
-        self.text_box = tk.Text(s, height=5, wrap="word", font=("Segoe UI", 11), relief="flat",
+        self.text_box = tk.Text(s, height=3, wrap="word", font=("Segoe UI", 11), relief="flat",
                                 padx=px(6), pady=px(4), highlightthickness=1, highlightbackground=BORDER,
                                 highlightcolor=ACCENT)
         self.text_box.insert("1.0", DEFAULT_TEXT)
         self.text_box.pack(fill="x")
         self.text_box.bind("<KeyRelease>", self.schedule_preview)
         row = ttk.Frame(s)
-        row.pack(fill="x", pady=(px(8), 0))
+        row.pack(fill="x", pady=(px(6), 0))
         ttk.Label(row, text="Alignment").pack(side="left", padx=(0, px(8)))
-        self.align_var = tk.StringVar(value="Left")
         segmented(row, ["Left", "Center", "Right"], self.align_var, self.schedule_preview).pack(side="left")
 
         s = section(t, "Font")
@@ -1202,8 +657,8 @@ class FontApp(tk.Tk):
         ttk.Entry(row, textvariable=self.search_var).pack(side="left", fill="x", expand=True)
         self.search_var.trace_add("write", self.schedule_filter)
         lb_row = ttk.Frame(s)
-        lb_row.pack(fill="x", pady=px(8))
-        self.listbox = styled_listbox(lb_row, 10)
+        lb_row.pack(fill="x", pady=px(6))
+        self.listbox = styled_listbox(lb_row, 8)
         sb = ttk.Scrollbar(lb_row, command=self.listbox.yview)
         self.listbox.configure(yscrollcommand=sb.set)
         self.listbox.pack(side="left", fill="both", expand=True)
@@ -1212,8 +667,6 @@ class FontApp(tk.Tk):
         self.listbox.bind("<Double-Button-1>", lambda e: self.add_font_fav(self.selected_font))
         row = ttk.Frame(s)
         row.pack(fill="x")
-        self.bold_var = tk.BooleanVar(value=False)
-        self.italic_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(row, text="Bold", variable=self.bold_var,
                         command=self.schedule_preview).pack(side="left")
         ttk.Checkbutton(row, text="Italic", variable=self.italic_var,
@@ -1224,12 +677,12 @@ class FontApp(tk.Tk):
             side="right", padx=(0, px(6)))
 
         s = section(t, "Favorite fonts")
-        self.fav_list = styled_listbox(s, 5)
+        self.fav_list = styled_listbox(s, 4)
         self.fav_list.pack(fill="x")
         self.fav_list.bind("<<ListboxSelect>>", self.on_fav_select)
         self.fav_list.bind("<Delete>", lambda e: self.remove_selected_fav())
         row = ttk.Frame(s)
-        row.pack(fill="x", pady=(px(6), 0))
+        row.pack(fill="x", pady=(px(4), 0))
         hint(row, "Double-click a font above to add it here.", side="left")
         ttk.Button(row, text="Remove", command=self.remove_selected_fav).pack(side="right")
         self.refresh_fav_ui()
@@ -1307,21 +760,21 @@ class FontApp(tk.Tk):
         ttk.Button(row, text="Export File…", command=self.export_preset_file).pack(side="left", padx=(px(6), 0))
 
     def build_main(self, body):
-        main = ttk.Labelframe(body, text="Preview", style="Section.TLabelframe", padding=px(10))
-        main.pack(side="left", fill="both", expand=True, padx=(px(14), 0))
+        main = ttk.Labelframe(body, text="Preview", style="Section.TLabelframe", padding=px(8))
+        main.pack(side="left", fill="both", expand=True, padx=(px(10), 0))
         top = ttk.Frame(main)
-        top.pack(fill="x", pady=(0, px(8)))
+        top.pack(fill="x", pady=(0, px(6)))
         ttk.Button(top, text="Undo", command=self.undo).pack(side="left")
         ttk.Button(top, text="Redo", command=self.redo).pack(side="left", padx=(px(6), 0))
         self.res_label = ttk.Label(top, text="0 x 0", style="Muted.TLabel")
-        self.res_label.pack(side="left", padx=px(16))
-        self.bg_toggle = tk.StringVar(value="Dark")
+        self.res_label.pack(side="left", padx=px(14))
         segmented(top, list(PREVIEW_BGS), self.bg_toggle,
                   lambda: self.set_preview_bg(self.bg_toggle.get())).pack(side="right")
         ttk.Label(top, text="Background", style="Muted.TLabel").pack(side="right", padx=(0, px(8)))
 
         holder = tk.Frame(main, highlightthickness=1, highlightbackground=BORDER)
         holder.pack(expand=True, fill="both")
+        self.preview_holder = holder
         self.canvas = tk.Canvas(holder, bg=PREVIEW_BGS[self.bg_toggle.get()], highlightthickness=0)
         self.canvas.pack(expand=True, fill="both")
         self.canvas.bind("<Configure>", self.schedule_preview)
@@ -1332,7 +785,7 @@ class FontApp(tk.Tk):
             self.canvas.configure(cursor="hand2")
 
     def build_footer(self):
-        footer = ttk.Frame(self, padding=(px(20), px(10)))
+        footer = ttk.Frame(self, padding=(px(14), px(7)))
         footer.pack(side="bottom", fill="x")
         ttk.Button(footer, text="Export…", style="Go.TButton", default="active",
                    command=self.export).pack(side="right")
@@ -1375,17 +828,22 @@ class FontApp(tk.Tk):
 
         keys = {"z": lambda e: self.undo(), "Z": undo_or_redo,
                 "y": lambda e: self.redo(), "Y": lambda e: self.redo()}
-        for k, fn in (("e", self.export), ("s", self.save_preset), ("o", self.show_presets)):
+        for k, fn in (("e", self.export), ("s", self.save_preset), ("o", self.show_presets),
+                      ("n", self.reset_design), ("b", self.toggle_bold), ("i", self.toggle_italic)):
             keys[k] = keys[k.upper()] = lambda e, fn=fn: fn()
         for k, handler in keys.items():
             self.bind_all(f"<Control-{k}>", handler)
+        self.bind_all("<F5>", lambda e: self.rescan())
         # Tk's Text widget has its own Ctrl+O (insert newline) and Ctrl+E (end of line)
         # bindings that run before bind_all; handle those keys first and stop there.
-        for k in "oOeE":
+        for k in "oOeEnNbBiI":
             self.text_box.bind(f"<Control-{k}>", lambda e, h=keys[k]: (h(e), "break")[1])
 
     def set_status(self, text, color="gray"):
-        self.status_label.configure(text=text, foreground=STATUS_COLORS.get(color, color))
+        c = STATUS_COLORS.get(color, color)
+        if DARK_MODE:
+            c = {"#5f6368": "#9aa0a6", "#0f7b0f": "#4cc355", "#c42b1c": "#ff6b6b", "#9d5d00": "#f0a020"}.get(c, c)
+        self.status_label.configure(text=text, foreground=c)
         self.status_is_note = False
 
     def set_preview_bg(self, choice):
@@ -1411,12 +869,14 @@ class FontApp(tk.Tk):
         prefs.setdefault("fav_fonts", [])
         prefs.setdefault("fav_colors", ["#000000"])
         prefs.setdefault("last_color", "#000000")
+        prefs.setdefault("dark_mode", False)
         return prefs
 
     def save_prefs(self):
         self.prefs["last_color"] = self.fill.color.value
         self.prefs["last_font"] = self.selected_font
         self.prefs["quality"] = self.quality.get()
+        self.prefs["dark_mode"] = self.dark_mode.get()
         if hasattr(self, "updater"):
             self.prefs.update(self.updater.state())
         try:
@@ -1469,6 +929,7 @@ class FontApp(tk.Tk):
         self.family_names = sorted(data, key=str.lower)
         if self.selected_font not in data and self.family_names:
             self.selected_font = "Arial" if "Arial" in data else self.family_names[0]
+        self.update_title()
         self.filter_fonts()
         self.schedule_preview()
 
@@ -1493,10 +954,12 @@ class FontApp(tk.Tk):
         sel = self.listbox.curselection()
         if sel:
             self.selected_font = self.matches[sel[0]]
+            self.update_title()
             self.schedule_preview()
 
     def pick_font(self, name):
         self.selected_font = name
+        self.update_title()
         if name not in self.matches:
             self.search_var.set("")
         self.filter_fonts()

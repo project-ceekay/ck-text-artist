@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.1
+
+- Top menu bar (`File`, `Edit`, `View`, `Style`, `Presets`, `Help`) with keyboard shortcuts and `Alt` mnemonics
+- 2×-supersampled procedural icon toolbar with instant hover tooltips and action shortcuts
+- Dark Mode toggle (`View -> Dark Mode` or toolbar moon icon) styling title bar, menus, toolbar, dialogs and panels
+- Active font displayed in the window title bar
+- Condensed 1180×760 layout with narrower left panel and compact heights for comfortable editing without vertical scrolling
+
 ## 1.0.0
 
 First public release.
