@@ -36,6 +36,10 @@ try:  # drag-out support; the app works without it
 except ImportError:
     TkinterDnD = None
 
+APP_NAME = "CK Text Artist"
+VERSION = "1.0.1"
+REPO = "project-ceekay/ck-text-artist"
+
 import ui_kit
 from ui_kit import *
 import rendering
